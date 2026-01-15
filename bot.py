@@ -366,7 +366,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     
                     await context.bot.send_message(user_id, "✅ Авторизація через QR-код успішна!")
                 except Exception as e:
+                    import traceback
                     print(f"❌ QR Auth Error: {e}")
+                    traceback.print_exc()
                     await context.bot.send_message(user_id, f"❌ Помилка QR авторизації: {e}")
 
             asyncio.create_task(wait_for_qr())

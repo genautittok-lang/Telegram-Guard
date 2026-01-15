@@ -446,14 +446,52 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_states[user_id] = 'waiting_api_id'
         await update.message.reply_text("📝 Тепер надішли API ID (отримай на my.telegram.org)")
     
-    elif state == 'waiting_api_id':
+    elif state == 'waiting_api_hash':
+        user_data[user_id]['api_hash'] = text
+        phone = user_data[user_id]['phone']
+        api_id = user_data[user_id]['api_id']
+        api_hash = text
+        
+        session_name = f'session_{user_id}_{phone.replace("+", "").replace(" ", "")}'
+        user_data[user_id]['session_name'] = session_name
+        
+        save_pending_auth(user_id, phone, api_id, api_hash, session_name, 'waiting_code')
+        
+        client = TelegramClient(
+            session_name, 
+            api_id, 
+            api_hash, 
+            device_model="Samsung Galaxy S21", 
+            system_version="Android 12",
+            app_version="8.4.1"
+        )
+        await client.connect()
+        
         try:
-            api_id = int(text)
-            user_data[user_id]['api_id'] = api_id
-            user_states[user_id] = 'waiting_api_hash'
-            await update.message.reply_text("📝 Тепер надішли API HASH")
-        except ValueError:
-            await update.message.reply_text("❌ API ID має бути числом")
+            print(f"📡 Відправка запиту коду для {phone} (API ID: {api_id})...", flush=True)
+            await client.send_code_request(phone)
+            user_data[user_id]['client'] = client
+            user_states[user_id] = 'waiting_code'
+            
+            keyboard = [
+                [InlineKeyboardButton("🔍 Використати QR-код", callback_data='auth_qr')],
+                [InlineKeyboardButton("🏠 Меню", callback_data='back')]
+            ]
+            await update.message.reply_text(
+                "📱 Код надіслано! Введи код з SMS/Telegram (5 цифр).\n\n"
+                "💡 Якщо код не приходить, спробуй авторизацію через QR-код:",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+        except PhoneNumberInvalidError:
+            print(f"❌ Невірний номер телефону: {phone}", flush=True)
+            delete_pending_auth(user_id)
+            await update.message.reply_text("❌ Невірний номер телефону. Перевір формат (+380...)")
+            await client.disconnect()
+        except Exception as e:
+            print(f"❌ Помилка send_code_request: {e}", flush=True)
+            delete_pending_auth(user_id)
+            await update.message.reply_text(f"❌ Помилка: {str(e)}")
+            await client.disconnect()
     
     elif state == 'waiting_2fa':
         password = text
@@ -500,46 +538,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             await update.message.reply_text(f"❌ Помилка 2FA: {e}")
             print(f"❌ 2FA Error: {e}")
-        user_data[user_id]['session_name'] = session_name
-        
-        save_pending_auth(user_id, phone, api_id, api_hash, session_name, 'waiting_code')
-        
-        client = TelegramClient(
-            session_name, 
-            api_id, 
-            api_hash, 
-            device_model="Samsung Galaxy S21", 
-            system_version="Android 12",
-            app_version="8.4.1"
-        )
-        await client.connect()
-        
-        try:
-            print(f"📡 Відправка запиту коду для {phone} (API ID: {api_id})...", flush=True)
-            # Force SMS if possible or just use default
-            await client.send_code_request(phone)
-            user_data[user_id]['client'] = client
-            user_states[user_id] = 'waiting_code'
-            
-            keyboard = [
-                [InlineKeyboardButton("🔍 Використати QR-код", callback_data='auth_qr')],
-                [InlineKeyboardButton("🏠 Меню", callback_data='back')]
-            ]
-            await update.message.reply_text(
-                "📱 Код надіслано! Введи код з SMS/Telegram (5 цифр).\n\n"
-                "💡 Якщо код не приходить, спробуй авторизацію через QR-код:",
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
-        except PhoneNumberInvalidError:
-            print(f"❌ Невірний номер телефону: {phone}", flush=True)
-            delete_pending_auth(user_id)
-            await update.message.reply_text("❌ Невірний номер телефону. Перевір формат (+380...)")
-            await client.disconnect()
-        except Exception as e:
-            print(f"❌ Помилка send_code_request: {e}", flush=True)
-            delete_pending_auth(user_id)
-            await update.message.reply_text(f"❌ Помилка: {str(e)}")
-            await client.disconnect()
     
     elif state == 'waiting_code':
         data = user_data.get(user_id)

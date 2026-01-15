@@ -1,0 +1,109 @@
+from telethon.sync import TelegramClient
+from telethon.errors import SessionPasswordNeededError
+from telethon.tl.functions.users import GetFullUserRequest
+from telethon import events, Button
+import asyncio
+
+# Твій бот токен від @BotFather
+BOT_TOKEN = 'ТВІЙ_БОТ_ТОКЕН_ЗДЕСЬ'
+
+# API дані для сесій (отримай на my.telegram.org)
+API_ID = 1234567
+API_HASH = 'твій_довгий_hash'
+
+# Список сесій (спочатку порожній, бот додає нові)
+sessions = []
+
+client = TelegramClient('bot', API_ID, API_HASH).start(bot_token=BOT_TOKEN)
+
+@client.on(events.NewMessage(pattern='/start'))
+async def start(event):
+    keyboard = [
+        [Button.inline("Додати користувача (авторизація)", b'add_user')],
+        [Button.inline("Перевірити список номерів", b'check_list')]
+    ]
+    await event.reply("Привіт! Бот для перевірки номерів в TG. Вибери дію:", buttons=keyboard)
+
+@client.on(events.CallbackQuery(data=b'add_user'))
+async event:
+    await event.answer("Починаємо авторизацію. Надішли номер телефону (+380...).")
+
+# Обробка номера, API ID, hash, коду
+@client.on(events.NewMessage)
+async event:
+    text = event.text.strip()
+
+    if text.startswith('+') or text.startswith('38'):  # Надісланий номер
+        global current_phone
+        current_phone = text
+        await event.reply("Ок, номер прийнято. Тепер надішли API ID (цифри з my.telegram.org).")
+
+    elif 'current_phone' in globals() and text.isdigit():  # API ID
+        global current_api_id
+        current_api_id = int(text)
+        await event.reply("API ID прийнято. Тепер надішли API HASH (довгий рядок з my.telegram.org).")
+
+    elif 'current_api_id' in globals() and 'current_phone' in globals() and len(text) > 20:  # API HASH
+        global current_api_hash
+        current_api_hash = text
+        await event.reply("API HASH прийнято. Тепер чекаю код з SMS від Telegram (введи, коли отримаєш).")
+
+    elif 'current_api_hash' in globals() and text.isdigit() and len(text) == 5:  # Код з SMS
+        new_session = TelegramClient(f'session_{current_phone}', current_api_id, current_api_hash)
+        await new_session.connect()
+        try:
+            await new_session.sign_in(current_phone, text)
+            sessions.append({'session': new_session, 'phone': current_phone})
+            await event.reply("Авторизація успішна! Користувач додано. Тепер можеш перевіряти номери.")
+        except SessionPasswordNeededError:
+            password = input("Потрібен 2FA пароль: ")  # Якщо 2FA, введи
+            await new_session.sign_in(password=password)
+            await event.reply("2FA пройдено!")
+        except Exception as e:
+            await event.reply(f"Помилка: {str(e)}")
+
+    elif 'check_list' in str(event.message.message):  # Перевірка списку
+        await event.reply("Кидай список номерів по одному на рядок (+380... або 380...).")
+
+    else:
+        # Перевірка списку
+        numbers = text.strip().split('\n')
+        results = []
+
+        if not sessions:
+            await event.reply("Спочатку додай хоча б одного користувача для перевірки.")
+            return
+
+        session = random.choice(sessions)['session']
+
+        await session.connect()
+        if not await session.is_user_authorized():
+            await event.reply("Сесія не авторизована. Додай нового користувача.")
+            return
+
+        for line in numbers:
+            line = line.strip()
+            if not line:
+                continue
+
+            # Парсинг рядка (номер + ім'я + ПІБ + дата)
+            parts = line.split()
+            phone = parts[0] if parts else ''
+            name = ' '.join(parts[1:]) if len(parts) > 1 else 'Невідомо'
+
+            try:
+                entity = await session.get_entity(phone)
+                full = await session(GetFullUserRequest(entity.id))
+                result = f"{phone}: зареган {name} {full.users[0].last_name or ''} {entity.first_name or ''} {entity.birthday or 'Дата невідома'}"
+            except ValueError:
+                result = f"{phone}: не зареган {name}"
+            except Exception as e:
+                result = f"{phone}: Помилка: {str(e)}"
+results.append(result)
+
+            # Затримка, щоб не банило
+            await asyncio.sleep(random.uniform(2, 5))
+
+        await event.reply("\n".join(results) or "Список порожній.")
+
+client.run_until_disconnected()

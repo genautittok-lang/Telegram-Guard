@@ -3,7 +3,9 @@ import asyncio
 import random
 import psycopg2
 from dotenv import load_dotenv
-from telethon import TelegramClient, events, Button
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
+from telethon import TelegramClient
 from telethon.errors import SessionPasswordNeededError, FloodWaitError
 from telethon.tl.functions.contacts import ImportContactsRequest, DeleteContactsRequest
 from telethon.tl.types import InputPhoneContact
@@ -11,12 +13,10 @@ from telethon.tl.types import InputPhoneContact
 load_dotenv()
 
 BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-API_ID = int(os.getenv('TELEGRAM_API_ID', '0'))
-API_HASH = os.getenv('TELEGRAM_API_HASH', '')
 DATABASE_URL = os.getenv('DATABASE_URL')
 
-user_sessions = {}
 user_states = {}
+user_data = {}
 
 def get_db():
     return psycopg2.connect(DATABASE_URL)
@@ -24,15 +24,6 @@ def get_db():
 def init_db():
     conn = get_db()
     cur = conn.cursor()
-    cur.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            id SERIAL PRIMARY KEY,
-            phone VARCHAR(20) NOT NULL UNIQUE,
-            first_name VARCHAR(100) NOT NULL,
-            last_name VARCHAR(100) NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
     cur.execute('''
         CREATE TABLE IF NOT EXISTS sessions (
             id SERIAL PRIMARY KEY,
@@ -47,21 +38,27 @@ def init_db():
     cur.close()
     conn.close()
 
-bot = TelegramClient('bot_session', API_ID, API_HASH)
-
-async def check_phone_in_telegram(session_client, phone):
+async def check_phone_in_telegram(api_id, api_hash, session_name, phone_to_check):
+    client = TelegramClient(session_name, api_id, api_hash)
+    await client.connect()
+    
+    if not await client.is_user_authorized():
+        await client.disconnect()
+        return {'error': 'Сесія не авторизована'}
+    
     try:
         contact = InputPhoneContact(
             client_id=random.randint(0, 9999999),
-            phone=phone,
+            phone=phone_to_check,
             first_name="Check",
             last_name="User"
         )
-        result = await session_client(ImportContactsRequest([contact]))
+        result = await client(ImportContactsRequest([contact]))
         
         if result.users:
             user = result.users[0]
-            await session_client(DeleteContactsRequest(id=[user.id]))
+            await client(DeleteContactsRequest(id=[user.id]))
+            await client.disconnect()
             return {
                 'registered': True,
                 'first_name': user.first_name or '',
@@ -69,212 +66,243 @@ async def check_phone_in_telegram(session_client, phone):
                 'username': user.username or ''
             }
         else:
+            await client.disconnect()
             return {'registered': False}
     except FloodWaitError as e:
+        await client.disconnect()
         return {'error': f'Зачекайте {e.seconds} секунд'}
     except Exception as e:
+        await client.disconnect()
         return {'error': str(e)}
 
-@bot.on(events.NewMessage(pattern='/start'))
-async def start(event):
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
-        [Button.inline("📋 Перевірити список", b'check_list')],
-        [Button.inline("➕ Додати сесію", b'add_session')],
-        [Button.inline("📊 Кількість сесій", b'session_count')],
-        [Button.inline("🗑️ Видалити сесію", b'delete_session')],
+        [InlineKeyboardButton("📋 Перевірити список", callback_data='check_list')],
+        [InlineKeyboardButton("➕ Додати сесію", callback_data='add_session')],
+        [InlineKeyboardButton("📊 Кількість сесій", callback_data='session_count')],
+        [InlineKeyboardButton("🗑️ Видалити сесію", callback_data='delete_session')],
     ]
-    await event.reply(
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(
         "👋 Привіт! Я бот для перевірки номерів в Telegram.\n\n"
         "📝 Надішли мені список номерів у форматі:\n"
         "+380991234567 Іван Петров\n"
         "+380997654321 Марія Сидоренко\n\n"
         "Або використовуй кнопки нижче:",
-        buttons=keyboard
+        reply_markup=reply_markup
     )
 
-@bot.on(events.CallbackQuery(data=b'check_list'))
-async def check_list_callback(event):
-    await event.answer()
-    user_states[event.sender_id] = 'waiting_list'
-    await event.respond(
-        "📋 Надішли список номерів для перевірки.\n"
-        "Формат: номер ім'я прізвище (кожен на новому рядку)\n\n"
-        "Приклад:\n"
-        "+380991234567 Іван Петров\n"
-        "+380997654321 Марія Сидоренко"
-    )
-
-@bot.on(events.CallbackQuery(data=b'add_session'))
-async def add_session_callback(event):
-    await event.answer()
-    user_states[event.sender_id] = 'waiting_phone'
-    await event.respond(
-        "📱 Надішли номер телефону для авторизації (формат: +380...)\n\n"
-        "⚠️ Це потрібно для перевірки номерів в Telegram."
-    )
-
-@bot.on(events.CallbackQuery(data=b'session_count'))
-async def session_count_callback(event):
-    await event.answer()
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT COUNT(*) FROM sessions")
-    count = cur.fetchone()[0]
-    cur.close()
-    conn.close()
-    await event.respond(f"📊 Кількість активних сесій: {count}")
-
-@bot.on(events.CallbackQuery(data=b'delete_session'))
-async def delete_session_callback(event):
-    await event.answer()
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT phone FROM sessions")
-    sessions = cur.fetchall()
-    cur.close()
-    conn.close()
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
     
-    if not sessions:
-        await event.respond("❌ Немає активних сесій для видалення.")
-        return
+    if query.data == 'check_list':
+        user_states[user_id] = 'waiting_list'
+        await query.edit_message_text(
+            "📋 Надішли список номерів для перевірки.\n"
+            "Формат: номер ім'я прізвище (кожен на новому рядку)\n\n"
+            "Приклад:\n"
+            "+380991234567 Іван Петров\n"
+            "+380997654321 Марія Сидоренко"
+        )
     
-    buttons = [[Button.inline(f"🗑️ {s[0]}", f'del_{s[0]}'.encode())] for s in sessions]
-    buttons.append([Button.inline("↩️ Назад", b'back')])
-    await event.respond("Виберіть сесію для видалення:", buttons=buttons)
-
-@bot.on(events.CallbackQuery(data=b'back'))
-async def back_callback(event):
-    await event.answer()
-    await start(event)
-
-@bot.on(events.CallbackQuery(pattern=b'del_'))
-async def delete_specific_session(event):
-    await event.answer()
-    phone = event.data.decode().replace('del_', '')
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM sessions WHERE phone = %s", (phone,))
-    conn.commit()
-    cur.close()
-    conn.close()
+    elif query.data == 'add_session':
+        user_states[user_id] = 'waiting_phone'
+        user_data[user_id] = {}
+        await query.edit_message_text(
+            "📱 Надішли номер телефону для авторизації (формат: +380...)\n\n"
+            "⚠️ Це потрібно для перевірки номерів в Telegram."
+        )
     
-    session_file = f'session_{phone.replace("+", "")}.session'
-    if os.path.exists(session_file):
-        os.remove(session_file)
+    elif query.data == 'session_count':
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM sessions")
+        count = cur.fetchone()[0]
+        cur.close()
+        conn.close()
+        
+        keyboard = [[InlineKeyboardButton("↩️ Назад", callback_data='back')]]
+        await query.edit_message_text(
+            f"📊 Кількість активних сесій: {count}",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
     
-    await event.respond(f"✅ Сесію {phone} видалено!")
-
-@bot.on(events.NewMessage)
-async def handle_message(event):
-    if event.text.startswith('/'):
-        return
-    
-    sender_id = event.sender_id
-    state = user_states.get(sender_id)
-    
-    if state == 'waiting_phone':
-        phone = event.text.strip()
-        if not phone.startswith('+'):
-            await event.reply("❌ Номер має починатися з +")
+    elif query.data == 'delete_session':
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT phone FROM sessions")
+        sessions = cur.fetchall()
+        cur.close()
+        conn.close()
+        
+        if not sessions:
+            keyboard = [[InlineKeyboardButton("↩️ Назад", callback_data='back')]]
+            await query.edit_message_text(
+                "❌ Немає активних сесій для видалення.",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
             return
         
-        user_sessions[sender_id] = {'phone': phone, 'step': 'waiting_api_id'}
-        user_states[sender_id] = 'waiting_api_id'
-        await event.reply("📝 Тепер надішли API ID (отримай на my.telegram.org)")
+        keyboard = [[InlineKeyboardButton(f"🗑️ {s[0]}", callback_data=f'del_{s[0]}')] for s in sessions]
+        keyboard.append([InlineKeyboardButton("↩️ Назад", callback_data='back')])
+        await query.edit_message_text(
+            "Виберіть сесію для видалення:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    
+    elif query.data == 'back':
+        keyboard = [
+            [InlineKeyboardButton("📋 Перевірити список", callback_data='check_list')],
+            [InlineKeyboardButton("➕ Додати сесію", callback_data='add_session')],
+            [InlineKeyboardButton("📊 Кількість сесій", callback_data='session_count')],
+            [InlineKeyboardButton("🗑️ Видалити сесію", callback_data='delete_session')],
+        ]
+        await query.edit_message_text(
+            "👋 Головне меню:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    
+    elif query.data.startswith('del_'):
+        phone = query.data.replace('del_', '')
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT session_name FROM sessions WHERE phone = %s", (phone,))
+        row = cur.fetchone()
+        if row:
+            session_file = row[0] + '.session'
+            if os.path.exists(session_file):
+                os.remove(session_file)
+        cur.execute("DELETE FROM sessions WHERE phone = %s", (phone,))
+        conn.commit()
+        cur.close()
+        conn.close()
+        
+        keyboard = [[InlineKeyboardButton("↩️ Назад", callback_data='back')]]
+        await query.edit_message_text(
+            f"✅ Сесію {phone} видалено!",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    text = update.message.text.strip()
+    state = user_states.get(user_id)
+    
+    if state == 'waiting_phone':
+        if not text.startswith('+'):
+            await update.message.reply_text("❌ Номер має починатися з +")
+            return
+        
+        user_data[user_id] = {'phone': text}
+        user_states[user_id] = 'waiting_api_id'
+        await update.message.reply_text("📝 Тепер надішли API ID (отримай на my.telegram.org)")
     
     elif state == 'waiting_api_id':
         try:
-            api_id = int(event.text.strip())
-            user_sessions[sender_id]['api_id'] = api_id
-            user_states[sender_id] = 'waiting_api_hash'
-            await event.reply("📝 Тепер надішли API HASH")
+            api_id = int(text)
+            user_data[user_id]['api_id'] = api_id
+            user_states[user_id] = 'waiting_api_hash'
+            await update.message.reply_text("📝 Тепер надішли API HASH")
         except ValueError:
-            await event.reply("❌ API ID має бути числом")
+            await update.message.reply_text("❌ API ID має бути числом")
     
     elif state == 'waiting_api_hash':
-        api_hash = event.text.strip()
-        user_sessions[sender_id]['api_hash'] = api_hash
+        user_data[user_id]['api_hash'] = text
+        phone = user_data[user_id]['phone']
+        api_id = user_data[user_id]['api_id']
+        api_hash = text
         
-        phone = user_sessions[sender_id]['phone']
-        api_id = user_sessions[sender_id]['api_id']
+        session_name = f'session_{phone.replace("+", "").replace(" ", "")}'
+        user_data[user_id]['session_name'] = session_name
         
-        session_name = f'session_{phone.replace("+", "")}'
         client = TelegramClient(session_name, api_id, api_hash)
         await client.connect()
         
         try:
             await client.send_code_request(phone)
-            user_sessions[sender_id]['client'] = client
-            user_sessions[sender_id]['session_name'] = session_name
-            user_states[sender_id] = 'waiting_code'
-            await event.reply("📱 Код надіслано! Введи код з SMS (5 цифр)")
+            user_data[user_id]['client'] = client
+            user_states[user_id] = 'waiting_code'
+            await update.message.reply_text("📱 Код надіслано! Введи код з SMS (5 цифр)")
         except Exception as e:
-            await event.reply(f"❌ Помилка: {str(e)}")
+            await update.message.reply_text(f"❌ Помилка: {str(e)}")
             await client.disconnect()
     
     elif state == 'waiting_code':
-        code = event.text.strip()
-        session_data = user_sessions.get(sender_id)
-        
-        if not session_data or 'client' not in session_data:
-            await event.reply("❌ Сесія не знайдена. Почни спочатку /start")
+        data = user_data.get(user_id)
+        if not data or 'client' not in data:
+            await update.message.reply_text("❌ Сесія не знайдена. Почни спочатку /start")
             return
         
-        client = session_data['client']
-        phone = session_data['phone']
+        client = data['client']
+        phone = data['phone']
         
         try:
-            await client.sign_in(phone, code)
+            await client.sign_in(phone, text)
             
             conn = get_db()
             cur = conn.cursor()
             cur.execute(
-                "INSERT INTO sessions (phone, api_id, api_hash, session_name) VALUES (%s, %s, %s, %s) ON CONFLICT (phone) DO UPDATE SET api_id = %s, api_hash = %s",
-                (phone, session_data['api_id'], session_data['api_hash'], session_data['session_name'], session_data['api_id'], session_data['api_hash'])
+                """INSERT INTO sessions (phone, api_id, api_hash, session_name) 
+                   VALUES (%s, %s, %s, %s) 
+                   ON CONFLICT (phone) DO UPDATE SET api_id = %s, api_hash = %s, session_name = %s""",
+                (phone, data['api_id'], data['api_hash'], data['session_name'],
+                 data['api_id'], data['api_hash'], data['session_name'])
             )
             conn.commit()
             cur.close()
             conn.close()
             
             await client.disconnect()
-            del user_sessions[sender_id]
-            user_states[sender_id] = None
+            del user_data[user_id]
+            user_states[user_id] = None
             
-            await event.reply("✅ Сесія успішно додана! Тепер можеш перевіряти номери.")
+            keyboard = [[InlineKeyboardButton("↩️ Назад", callback_data='back')]]
+            await update.message.reply_text(
+                "✅ Сесія успішно додана! Тепер можеш перевіряти номери.",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
         except SessionPasswordNeededError:
-            user_states[sender_id] = 'waiting_2fa'
-            await event.reply("🔐 Потрібен 2FA пароль. Введи його:")
+            user_states[user_id] = 'waiting_2fa'
+            await update.message.reply_text("🔐 Потрібен 2FA пароль. Введи його:")
         except Exception as e:
-            await event.reply(f"❌ Помилка: {str(e)}")
+            await update.message.reply_text(f"❌ Помилка: {str(e)}")
     
     elif state == 'waiting_2fa':
-        password = event.text.strip()
-        session_data = user_sessions.get(sender_id)
-        client = session_data['client']
-        phone = session_data['phone']
+        data = user_data.get(user_id)
+        client = data['client']
+        phone = data['phone']
         
         try:
-            await client.sign_in(password=password)
+            await client.sign_in(password=text)
             
             conn = get_db()
             cur = conn.cursor()
             cur.execute(
-                "INSERT INTO sessions (phone, api_id, api_hash, session_name) VALUES (%s, %s, %s, %s) ON CONFLICT (phone) DO UPDATE SET api_id = %s, api_hash = %s",
-                (phone, session_data['api_id'], session_data['api_hash'], session_data['session_name'], session_data['api_id'], session_data['api_hash'])
+                """INSERT INTO sessions (phone, api_id, api_hash, session_name) 
+                   VALUES (%s, %s, %s, %s) 
+                   ON CONFLICT (phone) DO UPDATE SET api_id = %s, api_hash = %s, session_name = %s""",
+                (phone, data['api_id'], data['api_hash'], data['session_name'],
+                 data['api_id'], data['api_hash'], data['session_name'])
             )
             conn.commit()
             cur.close()
             conn.close()
             
             await client.disconnect()
-            del user_sessions[sender_id]
-            user_states[sender_id] = None
+            del user_data[user_id]
+            user_states[user_id] = None
             
-            await event.reply("✅ 2FA пройдено! Сесія додана.")
+            keyboard = [[InlineKeyboardButton("↩️ Назад", callback_data='back')]]
+            await update.message.reply_text(
+                "✅ 2FA пройдено! Сесія додана.",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
         except Exception as e:
-            await event.reply(f"❌ Помилка 2FA: {str(e)}")
+            await update.message.reply_text(f"❌ Помилка 2FA: {str(e)}")
     
-    elif state == 'waiting_list' or (state is None and '\n' in event.text):
+    elif state == 'waiting_list' or '\n' in text or text.startswith('+'):
         conn = get_db()
         cur = conn.cursor()
         cur.execute("SELECT phone, api_id, api_hash, session_name FROM sessions LIMIT 1")
@@ -283,21 +311,18 @@ async def handle_message(event):
         conn.close()
         
         if not session:
-            await event.reply("❌ Спочатку додай сесію для перевірки номерів!")
+            keyboard = [[InlineKeyboardButton("➕ Додати сесію", callback_data='add_session')]]
+            await update.message.reply_text(
+                "❌ Спочатку додай сесію для перевірки номерів!",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
             return
         
-        await event.reply("⏳ Перевіряю номери...")
+        await update.message.reply_text("⏳ Перевіряю номери...")
         
         phone_db, api_id, api_hash, session_name = session
-        client = TelegramClient(session_name, api_id, api_hash)
-        await client.connect()
         
-        if not await client.is_user_authorized():
-            await event.reply("❌ Сесія не авторизована. Додай нову сесію.")
-            await client.disconnect()
-            return
-        
-        lines = event.text.strip().split('\n')
+        lines = text.strip().split('\n')
         results = []
         
         for line in lines:
@@ -315,7 +340,7 @@ async def handle_message(event):
             if not phone.startswith('+'):
                 phone = '+' + phone
             
-            check_result = await check_phone_in_telegram(client, phone)
+            check_result = await check_phone_in_telegram(api_id, api_hash, session_name, phone)
             
             if 'error' in check_result:
                 results.append(f"⚠️ {phone} {name} - Помилка: {check_result['error']}")
@@ -328,26 +353,32 @@ async def handle_message(event):
             
             await asyncio.sleep(random.uniform(2, 4))
         
-        await client.disconnect()
-        user_states[sender_id] = None
+        user_states[user_id] = None
         
         if results:
             response = "📊 Результати перевірки:\n\n" + "\n".join(results)
             if len(response) > 4000:
                 chunks = [response[i:i+4000] for i in range(0, len(response), 4000)]
                 for chunk in chunks:
-                    await event.reply(chunk)
+                    await update.message.reply_text(chunk)
             else:
-                await event.reply(response)
+                keyboard = [[InlineKeyboardButton("↩️ Назад", callback_data='back')]]
+                await update.message.reply_text(response, reply_markup=InlineKeyboardMarkup(keyboard))
         else:
-            await event.reply("❌ Не знайдено жодного номера для перевірки")
+            await update.message.reply_text("❌ Не знайдено жодного номера для перевірки")
 
-async def main():
+def main():
     print("🤖 Запуск бота...")
     init_db()
-    await bot.start(bot_token=BOT_TOKEN)
+    
+    app = Application.builder().token(BOT_TOKEN).build()
+    
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(button_callback))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
     print("✅ Бот запущено!")
-    await bot.run_until_disconnected()
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    main()

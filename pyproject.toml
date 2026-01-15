@@ -6,5 +6,6 @@ requires-python = ">=3.11"
 dependencies = [
     "psycopg2-binary>=2.9.11",
     "python-dotenv>=1.2.1",
+    "python-telegram-bot>=22.5",
     "telethon>=1.42.0",
 ]

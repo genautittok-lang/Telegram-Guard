@@ -600,18 +600,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Не знайдено жодного номера для перевірки")
 
 def main():
-    print("🤖 Запуск бота...")
-    init_pool()
-    init_db()
+    import sys
+    import traceback
     
-    app = Application.builder().token(BOT_TOKEN).build()
+    sys.stdout = open('/tmp/bot_stdout.log', 'a', buffering=1)
+    sys.stderr = open('/tmp/bot_stderr.log', 'a', buffering=1)
     
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(button_callback))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    
-    print("✅ Бот запущено!")
-    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+    try:
+        print("🤖 Запуск бота...", flush=True)
+        init_pool()
+        init_db()
+        
+        app = Application.builder().token(BOT_TOKEN).build()
+        
+        app.add_handler(CommandHandler("start", start))
+        app.add_handler(CallbackQueryHandler(button_callback))
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+        
+        print("✅ Бот запущено!", flush=True)
+        app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+    except Exception as e:
+        print(f"❌ КРИТИЧНА ПОМИЛКА: {e}", flush=True)
+        traceback.print_exc()
+        raise
 
 if __name__ == '__main__':
     main()

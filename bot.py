@@ -365,6 +365,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     user_states[user_id] = None
                     
                     await context.bot.send_message(user_id, "✅ Авторизація через QR-код успішна!")
+                except SessionPasswordNeededError:
+                    user_states[user_id] = 'waiting_2fa'
+                    await context.bot.send_message(user_id, "🔐 У тебе ввімкнена двофакторна автентифікація (2FA). Будь ласка, введи свій пароль:")
                 except Exception as e:
                     import traceback
                     print(f"❌ QR Auth Error: {e}")

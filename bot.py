@@ -1,6 +1,8 @@
 import os
 import asyncio
 import random
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 import psycopg2
 from psycopg2 import pool
 from dotenv import load_dotenv
@@ -599,17 +601,31 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await update.message.reply_text("❌ Не знайдено жодного номера для перевірки")
 
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(b'Bot is running')
+    def log_message(self, format, *args):
+        pass
+
+def start_health_server():
+    server = HTTPServer(('0.0.0.0', 3000), HealthHandler)
+    server.serve_forever()
+
 def main():
     import sys
     import traceback
-    
-    sys.stdout = open('/tmp/bot_stdout.log', 'a', buffering=1)
-    sys.stderr = open('/tmp/bot_stderr.log', 'a', buffering=1)
     
     try:
         print("🤖 Запуск бота...", flush=True)
         init_pool()
         init_db()
+        
+        health_thread = threading.Thread(target=start_health_server, daemon=True)
+        health_thread.start()
+        print("✅ Health server на порту 3000", flush=True)
         
         app = Application.builder().token(BOT_TOKEN).build()
         

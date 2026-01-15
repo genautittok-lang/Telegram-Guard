@@ -2,6 +2,7 @@ import os
 import asyncio
 import random
 import psycopg2
+from psycopg2 import pool
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
@@ -18,8 +19,22 @@ DATABASE_URL = os.getenv('DATABASE_URL')
 user_states = {}
 user_data = {}
 
+db_pool = None
+
+def init_pool():
+    global db_pool
+    db_pool = pool.SimpleConnectionPool(1, 10, DATABASE_URL)
+
 def get_db():
+    if db_pool:
+        return db_pool.getconn()
     return psycopg2.connect(DATABASE_URL)
+
+def release_db(conn):
+    if db_pool:
+        db_pool.putconn(conn)
+    else:
+        conn.close()
 
 def init_db():
     conn = get_db()
@@ -80,7 +95,7 @@ def init_db():
     cur.execute('CREATE INDEX IF NOT EXISTS idx_sessions_owner ON sessions(owner_id)')
     conn.commit()
     cur.close()
-    conn.close()
+    release_db(conn)
 
 def get_user_sessions(owner_id):
     conn = get_db()
@@ -91,7 +106,7 @@ def get_user_sessions(owner_id):
     )
     sessions = cur.fetchall()
     cur.close()
-    conn.close()
+    release_db(conn)
     return sessions
 
 def mark_session_inactive(session_id):
@@ -100,7 +115,7 @@ def mark_session_inactive(session_id):
     cur.execute("UPDATE sessions SET is_active = FALSE WHERE id = %s", (session_id,))
     conn.commit()
     cur.close()
-    conn.close()
+    release_db(conn)
 
 def save_pending_auth(user_id, phone, api_id, api_hash, session_name, state):
     conn = get_db()
@@ -118,7 +133,7 @@ def save_pending_auth(user_id, phone, api_id, api_hash, session_name, state):
     """, (user_id, phone, api_id, api_hash, session_name, state))
     conn.commit()
     cur.close()
-    conn.close()
+    release_db(conn)
 
 def get_pending_auth(user_id):
     conn = get_db()
@@ -129,7 +144,7 @@ def get_pending_auth(user_id):
     )
     result = cur.fetchone()
     cur.close()
-    conn.close()
+    release_db(conn)
     return result
 
 def delete_pending_auth(user_id):
@@ -138,7 +153,7 @@ def delete_pending_auth(user_id):
     cur.execute("DELETE FROM pending_auth WHERE user_id = %s", (user_id,))
     conn.commit()
     cur.close()
-    conn.close()
+    release_db(conn)
 
 async def check_phone_in_telegram(api_id, api_hash, session_name, phone_to_check, session_id=None):
     client = TelegramClient(session_name, api_id, api_hash)
@@ -581,6 +596,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     print("🤖 Запуск бота...")
+    init_pool()
     init_db()
     
     app = Application.builder().token(BOT_TOKEN).build()

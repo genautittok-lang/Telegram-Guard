@@ -218,7 +218,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 user_states[user_id] = 'waiting_code'
                 await update.message.reply_text(
                     f"📱 У тебе є незавершена авторизація для {phone}.\n"
-                    "Код відправлено повторно. Введи код з SMS/Telegram:"
+                    "Код відправлено повторно. Введи код з SMS/Telegram:",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Меню", callback_data='back')]])
                 )
                 return
             except Exception as e:

@@ -327,7 +327,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         api_hash = data['api_hash']
         session_name = data.get('session_name', f'session_qr_{user_id}')
         
-        client = TelegramClient(session_name, api_id, api_hash, device_model="Desktop", system_version="Windows 10")
+        client = TelegramClient(
+            session_name, 
+            api_id, 
+            api_hash, 
+            device_model="Samsung Galaxy S21", 
+            system_version="Android 12",
+            app_version="8.4.1"
+        )
         await client.connect()
         
         try:
@@ -448,18 +455,63 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except ValueError:
             await update.message.reply_text("❌ API ID має бути числом")
     
-    elif state == 'waiting_api_hash':
-        user_data[user_id]['api_hash'] = text
-        phone = user_data[user_id]['phone']
-        api_id = user_data[user_id]['api_id']
-        api_hash = text
+    elif state == 'waiting_2fa':
+        password = text
+        client = user_data.get(user_id, {}).get('client')
         
-        session_name = f'session_{user_id}_{phone.replace("+", "").replace(" ", "")}'
+        if not client:
+            await update.message.reply_text("❌ Помилка: клієнт не знайдений. Спробуй почати спочатку.")
+            user_states[user_id] = None
+            return
+            
+        try:
+            await client.sign_in(password=password)
+            # Success!
+            me = await client.get_me()
+            phone = me.phone
+            
+            data = user_data.get(user_id, {})
+            api_id = data.get('api_id')
+            api_hash = data.get('api_hash')
+            session_name = data.get('session_name', f'session_qr_{user_id}')
+            
+            conn = get_db()
+            cur = conn.cursor()
+            cur.execute(
+                """INSERT INTO sessions (owner_id, phone, api_id, api_hash, session_name) 
+                   VALUES (%s, %s, %s, %s, %s) 
+                   ON CONFLICT (owner_id, phone) DO UPDATE SET 
+                   api_id = EXCLUDED.api_id, 
+                   api_hash = EXCLUDED.api_hash, 
+                   session_name = EXCLUDED.session_name,
+                   is_active = TRUE""",
+                (user_id, phone, api_id, api_hash, session_name)
+            )
+            conn.commit()
+            cur.close()
+            conn.close()
+            
+            delete_pending_auth(user_id)
+            if user_id in user_data:
+                del user_data[user_id]
+            user_states[user_id] = None
+            
+            await update.message.reply_text("✅ Авторизація успішна (2FA пройдено)!")
+        except Exception as e:
+            await update.message.reply_text(f"❌ Помилка 2FA: {e}")
+            print(f"❌ 2FA Error: {e}")
         user_data[user_id]['session_name'] = session_name
         
         save_pending_auth(user_id, phone, api_id, api_hash, session_name, 'waiting_code')
         
-        client = TelegramClient(session_name, api_id, api_hash, device_model="Desktop", system_version="Windows 10")
+        client = TelegramClient(
+            session_name, 
+            api_id, 
+            api_hash, 
+            device_model="Samsung Galaxy S21", 
+            system_version="Android 12",
+            app_version="8.4.1"
+        )
         await client.connect()
         
         try:

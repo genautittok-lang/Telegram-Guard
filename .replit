@@ -1,4 +1,4 @@
-modules = ["nodejs-22", "postgresql-16"]
+modules = ["nodejs-22", "postgresql-16", "python-3.11"]
 
 [agent]
 stack = "AGENT_STACK"
@@ -7,7 +7,7 @@ integrations = ["javascript_openai_ai_integrations:2.0.0"]
 
 [nix]
 channel = "stable-24_11"
-packages = ["jq"]
+packages = ["jq", "openssl"]
 
 [env]
 MASTRA_HIDE_CLOUD_CTA = "true"

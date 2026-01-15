@@ -8,6 +8,9 @@ import { z } from "zod";
 
 import { sharedPostgresStorage } from "./storage";
 import { inngest, inngestServe } from "./inngest";
+import { registerTelegramTrigger } from "../triggers/telegramTriggers";
+import { userCheckAgent } from "./agents/userCheckAgent";
+import { userCheckWorkflow } from "./workflows/userCheckWorkflow";
 
 // ======================================================================
 // Option 1: FOR TIME-BASED (CRON) TRIGGERS
@@ -117,10 +120,8 @@ class ProductionPinoLogger extends MastraLogger {
 
 export const mastra = new Mastra({
   storage: sharedPostgresStorage,
-  // Register your workflows here
-  workflows: {},
-  // Register your agents here
-  agents: {},
+  workflows: { userCheckWorkflow },
+  agents: { userCheckAgent },
   bundler: {
     // A few dependencies are not properly picked up by
     // the bundler if they are not added directly to the
@@ -177,8 +178,26 @@ export const mastra = new Mastra({
         createHandler: async ({ mastra }) => inngestServe({ mastra, inngest }),
       },
 
-      // Add webhook triggers here (see Option 2 above)
-      // Example: ...registerSlackTrigger({ ... })
+      ...registerTelegramTrigger({
+        triggerType: "telegram/message",
+        handler: async (mastra, triggerInfo) => {
+          const logger = mastra.getLogger();
+          logger?.info("📨 [Telegram Trigger] Отримано повідомлення:", triggerInfo.params);
+
+          const run = await userCheckWorkflow.createRunAsync();
+          await inngest.send({
+            name: `workflow.${userCheckWorkflow.id}`,
+            data: {
+              runId: run?.runId,
+              inputData: {
+                message: triggerInfo.params.message,
+                chatId: triggerInfo.params.chatId,
+                userName: triggerInfo.params.userName,
+              },
+            },
+          });
+        },
+      }),
     ],
   },
   logger:

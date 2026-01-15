@@ -49,6 +49,7 @@ export type TriggerInfoTelegramOnNewMessage = {
   params: {
     userName: string;
     message: string;
+    chatId: number;
   };
   payload: any;
 };
@@ -79,6 +80,7 @@ export function registerTelegramTrigger({
             params: {
               userName: payload.message.from.username,
               message: payload.message.text,
+              chatId: payload.message.chat.id,
             },
             payload,
           } as TriggerInfoTelegramOnNewMessage);

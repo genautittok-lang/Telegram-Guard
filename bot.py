@@ -383,11 +383,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await client.connect()
         
         try:
+            print(f"📡 Відправка запиту коду для {phone}...", flush=True)
             await client.send_code_request(phone)
             user_data[user_id]['client'] = client
             user_states[user_id] = 'waiting_code'
             await update.message.reply_text("📱 Код надіслано! Введи код з SMS/Telegram (5 цифр)")
         except Exception as e:
+            print(f"❌ Помилка send_code_request: {e}", flush=True)
             delete_pending_auth(user_id)
             await update.message.reply_text(f"❌ Помилка: {str(e)}")
             await client.disconnect()
@@ -540,11 +542,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             phone = parts[0] if parts else ''
             name = parts[1] if len(parts) > 1 else 'Невідомо'
             
-            if not phone.startswith('+') and not phone.startswith('38'):
+            if not phone.startswith('+') and not phone.startswith('38') and not phone.startswith('7'):
                 continue
             
             if not phone.startswith('+'):
-                phone = '+' + phone
+                if phone.startswith('38'):
+                    phone = '+' + phone
+                elif phone.startswith('7'):
+                    phone = '+' + phone
             
             check_result = None
             attempts = 0

@@ -460,6 +460,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_states[user_id] = 'waiting_api_id'
         await update.message.reply_text("📝 Тепер надішли API ID (отримай на my.telegram.org)")
     
+    elif state == 'waiting_api_id':
+        try:
+            api_id = int(text)
+            user_data[user_id]['api_id'] = api_id
+            user_states[user_id] = 'waiting_api_hash'
+            await update.message.reply_text("📝 Тепер надішли API HASH")
+        except ValueError:
+            await update.message.reply_text("❌ API ID має бути числом")
+    
     elif state == 'waiting_api_hash':
         user_data[user_id]['api_hash'] = text
         phone = user_data[user_id]['phone']

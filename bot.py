@@ -1,3 +1,5 @@
+import io
+import qrcode
 import os
 import asyncio
 import random
@@ -6,10 +8,10 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 import psycopg2
 from psycopg2 import pool
 from dotenv import load_dotenv
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 from telethon import TelegramClient
-from telethon.errors import SessionPasswordNeededError, FloodWaitError
+from telethon.errors import SessionPasswordNeededError, FloodWaitError, PhoneNumberInvalidError
 from telethon.tl.functions.contacts import ImportContactsRequest, DeleteContactsRequest
 from telethon.tl.types import InputPhoneContact
 
@@ -216,11 +218,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await client.send_code_request(phone)
                 user_data[user_id]['client'] = client
                 user_states[user_id] = 'waiting_code'
-                await update.message.reply_text(
-                    f"📱 У тебе є незавершена авторизація для {phone}.\n"
-                    "Код відправлено повторно. Введи код з SMS/Telegram:",
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Меню", callback_data='back')]])
-                )
+            await update.message.reply_text(
+                f"📱 У тебе є незавершена авторизація для {phone}.\n"
+                "Код відправлено повторно. Введи код з SMS/Telegram:",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🏠 Меню", callback_data='back')],
+                    [InlineKeyboardButton("🔍 Використати QR-код", callback_data='auth_qr')]
+                ])
+            )
                 return
             except Exception as e:
                 await client.disconnect()
@@ -312,6 +317,75 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
     
+    elif query.data == 'auth_qr':
+        data = user_data.get(user_id)
+        if not data or 'api_id' not in data:
+            await query.edit_message_text("❌ Спочатку введи номер та API дані.")
+            return
+
+        api_id = data['api_id']
+        api_hash = data['api_hash']
+        session_name = data.get('session_name', f'session_qr_{user_id}')
+        
+        client = TelegramClient(session_name, api_id, api_hash, device_model="Desktop", system_version="Windows 10")
+        await client.connect()
+        
+        try:
+            qr_login = await client.qr_login()
+            user_data[user_id]['client'] = client
+            user_data[user_id]['qr_login'] = qr_login
+            
+            async def wait_for_qr():
+                try:
+                    await qr_login.wait()
+                    # Success!
+                    me = await client.get_me()
+                    phone = me.phone
+                    
+                    conn = get_db()
+                    cur = conn.cursor()
+                    cur.execute(
+                        """INSERT INTO sessions (owner_id, phone, api_id, api_hash, session_name) 
+                           VALUES (%s, %s, %s, %s, %s) 
+                           ON CONFLICT (owner_id, phone) DO UPDATE SET 
+                           api_id = EXCLUDED.api_id, 
+                           api_hash = EXCLUDED.api_hash, 
+                           session_name = EXCLUDED.session_name,
+                           is_active = TRUE""",
+                        (user_id, phone, api_id, api_hash, session_name)
+                    )
+                    conn.commit()
+                    cur.close()
+                    conn.close()
+                    
+                    delete_pending_auth(user_id)
+                    await client.disconnect()
+                    if user_id in user_data:
+                        del user_data[user_id]
+                    user_states[user_id] = None
+                    
+                    await context.bot.send_message(user_id, "✅ Авторизація через QR-код успішна!")
+                except Exception as e:
+                    print(f"❌ QR Auth Error: {e}")
+                    await context.bot.send_message(user_id, f"❌ Помилка QR авторизації: {e}")
+
+            asyncio.create_task(wait_for_qr())
+
+            qr_url = qr_login.url
+            img = qrcode.make(qr_url)
+            bio = io.BytesIO()
+            img.save(bio, 'PNG')
+            bio.seek(0)
+            
+            await query.message.reply_photo(
+                photo=bio,
+                caption="🔍 Відскануй цей QR-код у налаштуваннях Telegram (Пристрої -> Підключити пристрій).\n\n"
+                        "⚠️ Код дійсний 30 секунд. Після сканування бот автоматично додасть сесію."
+            )
+        except Exception as e:
+            await query.edit_message_text(f"❌ Помилка створення QR: {e}")
+            await client.disconnect()
+
     elif query.data == 'back':
         keyboard = [
             [InlineKeyboardButton("📋 Перевірити список", callback_data='check_list')],
@@ -389,7 +463,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await client.send_code_request(phone)
             user_data[user_id]['client'] = client
             user_states[user_id] = 'waiting_code'
-            await update.message.reply_text("📱 Код надіслано! Введи код з SMS/Telegram (5 цифр)")
+            
+            keyboard = [
+                [InlineKeyboardButton("🔍 Використати QR-код", callback_data='auth_qr')],
+                [InlineKeyboardButton("🏠 Меню", callback_data='back')]
+            ]
+            await update.message.reply_text(
+                "📱 Код надіслано! Введи код з SMS/Telegram (5 цифр).\n\n"
+                "💡 Якщо код не приходить, спробуй авторизацію через QR-код:",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+        except PhoneNumberInvalidError:
+            print(f"❌ Невірний номер телефону: {phone}", flush=True)
+            delete_pending_auth(user_id)
+            await update.message.reply_text("❌ Невірний номер телефону. Перевір формат (+380...)")
+            await client.disconnect()
         except Exception as e:
             print(f"❌ Помилка send_code_request: {e}", flush=True)
             delete_pending_auth(user_id)

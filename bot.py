@@ -241,12 +241,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    print(f"🔘 Кнопка натиснута: {update.callback_query.data}")
     query = update.callback_query
     try:
         await query.answer()
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"❌ Помилка answer: {e}")
     user_id = query.from_user.id
+    print(f"👤 User ID: {user_id}, Data: {query.data}")
     
     if query.data == 'check_list':
         sessions = get_user_sessions(user_id)

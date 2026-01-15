@@ -160,7 +160,14 @@ def delete_pending_auth(user_id):
     release_db(conn)
 
 async def check_phone_in_telegram(api_id, api_hash, session_name, phone_to_check, session_id=None):
-    client = TelegramClient(session_name, api_id, api_hash)
+    client = TelegramClient(
+        session_name, 
+        api_id, 
+        api_hash,
+        device_model="Samsung Galaxy S21", 
+        system_version="Android 12",
+        app_version="8.4.1"
+    )
     await client.connect()
     
     if not await client.is_user_authorized():
@@ -212,7 +219,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         }
         
         if state == 'waiting_code':
-            client = TelegramClient(session_name, api_id, api_hash)
+            client = TelegramClient(
+                session_name, 
+                api_id, 
+                api_hash,
+                device_model="Samsung Galaxy S21", 
+                system_version="Android 12",
+                app_version="8.4.1"
+            )
             await client.connect()
             try:
                 await client.send_code_request(phone)
@@ -546,7 +560,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pending = get_pending_auth(user_id)
             if pending:
                 phone, api_id, api_hash, session_name, _ = pending
-                client = TelegramClient(session_name, api_id, api_hash)
+                client = TelegramClient(
+                    session_name, 
+                    api_id, 
+                    api_hash,
+                    device_model="Samsung Galaxy S21", 
+                    system_version="Android 12",
+                    app_version="8.4.1"
+                )
                 await client.connect()
                 user_data[user_id] = {
                     'phone': phone,
@@ -611,7 +632,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pending = get_pending_auth(user_id)
             if pending:
                 phone, api_id, api_hash, session_name, _ = pending
-                client = TelegramClient(session_name, api_id, api_hash)
+                client = TelegramClient(
+                    session_name, 
+                    api_id, 
+                    api_hash,
+                    device_model="Samsung Galaxy S21", 
+                    system_version="Android 12",
+                    app_version="8.4.1"
+                )
                 await client.connect()
                 user_data[user_id] = {
                     'phone': phone,

@@ -7,7 +7,7 @@ dependencies = [
     "pillow>=12.1.0",
     "psycopg2-binary>=2.9.11",
     "python-dotenv>=1.2.1",
-    "python-telegram-bot>=22.5",
+    "python-telegram-bot==21.10",
     "qrcode>=8.2",
     "telegram>=0.0.1",
     "telethon>=1.42.0",

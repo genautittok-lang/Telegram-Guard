@@ -8,7 +8,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 import psycopg2
 from psycopg2 import pool
 from dotenv import load_dotenv
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 from telethon import TelegramClient
 from telethon.errors import SessionPasswordNeededError, FloodWaitError, PhoneNumberInvalidError
@@ -218,14 +218,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await client.send_code_request(phone)
                 user_data[user_id]['client'] = client
                 user_states[user_id] = 'waiting_code'
-            await update.message.reply_text(
-                f"📱 У тебе є незавершена авторизація для {phone}.\n"
-                "Код відправлено повторно. Введи код з SMS/Telegram:",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🏠 Меню", callback_data='back')],
-                    [InlineKeyboardButton("🔍 Використати QR-код", callback_data='auth_qr')]
-                ])
-            )
+                await update.message.reply_text(
+                    f"📱 У тебе є незавершена авторизація для {phone}.\n"
+                    "Код відправлено повторно. Введи код з SMS/Telegram:",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🏠 Меню", callback_data='back')],
+                        [InlineKeyboardButton("🔍 Використати QR-код", callback_data='auth_qr')]
+                    ])
+                )
                 return
             except Exception as e:
                 await client.disconnect()

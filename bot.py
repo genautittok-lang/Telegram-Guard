@@ -379,11 +379,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         save_pending_auth(user_id, phone, api_id, api_hash, session_name, 'waiting_code')
         
-        client = TelegramClient(session_name, api_id, api_hash)
+        client = TelegramClient(session_name, api_id, api_hash, device_model="Desktop", system_version="Windows 10")
         await client.connect()
         
         try:
-            print(f"📡 Відправка запиту коду для {phone}...", flush=True)
+            print(f"📡 Відправка запиту коду для {phone} (API ID: {api_id})...", flush=True)
+            # Force SMS if possible or just use default
             await client.send_code_request(phone)
             user_data[user_id]['client'] = client
             user_states[user_id] = 'waiting_code'

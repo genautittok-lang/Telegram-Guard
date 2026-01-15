@@ -24,27 +24,131 @@ def get_db():
 def init_db():
     conn = get_db()
     cur = conn.cursor()
+    
+    cur.execute("""
+        SELECT EXISTS (
+            SELECT FROM information_schema.tables 
+            WHERE table_name = 'sessions'
+        )
+    """)
+    table_exists = cur.fetchone()[0]
+    
+    if not table_exists:
+        cur.execute('''
+            CREATE TABLE sessions (
+                id SERIAL PRIMARY KEY,
+                owner_id BIGINT NOT NULL,
+                phone VARCHAR(20) NOT NULL,
+                api_id INTEGER NOT NULL,
+                api_hash VARCHAR(100) NOT NULL,
+                session_name VARCHAR(100) NOT NULL,
+                is_active BOOLEAN DEFAULT TRUE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(owner_id, phone)
+            )
+        ''')
+    else:
+        cur.execute("""
+            SELECT column_name FROM information_schema.columns 
+            WHERE table_name = 'sessions' AND column_name = 'owner_id'
+        """)
+        if not cur.fetchone():
+            cur.execute("ALTER TABLE sessions ADD COLUMN owner_id BIGINT DEFAULT 0")
+            cur.execute("UPDATE sessions SET owner_id = 0 WHERE owner_id IS NULL")
+            cur.execute("ALTER TABLE sessions ALTER COLUMN owner_id SET NOT NULL")
+        
+        cur.execute("""
+            SELECT column_name FROM information_schema.columns 
+            WHERE table_name = 'sessions' AND column_name = 'is_active'
+        """)
+        if not cur.fetchone():
+            cur.execute("ALTER TABLE sessions ADD COLUMN is_active BOOLEAN DEFAULT TRUE")
+    
     cur.execute('''
-        CREATE TABLE IF NOT EXISTS sessions (
+        CREATE TABLE IF NOT EXISTS pending_auth (
             id SERIAL PRIMARY KEY,
-            phone VARCHAR(20) NOT NULL UNIQUE,
+            user_id BIGINT NOT NULL UNIQUE,
+            phone VARCHAR(20) NOT NULL,
             api_id INTEGER NOT NULL,
             api_hash VARCHAR(100) NOT NULL,
             session_name VARCHAR(100) NOT NULL,
+            state VARCHAR(20) NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_sessions_owner ON sessions(owner_id)')
     conn.commit()
     cur.close()
     conn.close()
 
-async def check_phone_in_telegram(api_id, api_hash, session_name, phone_to_check):
+def get_user_sessions(owner_id):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT id, phone, api_id, api_hash, session_name FROM sessions WHERE owner_id = %s AND is_active = TRUE",
+        (owner_id,)
+    )
+    sessions = cur.fetchall()
+    cur.close()
+    conn.close()
+    return sessions
+
+def mark_session_inactive(session_id):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("UPDATE sessions SET is_active = FALSE WHERE id = %s", (session_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+def save_pending_auth(user_id, phone, api_id, api_hash, session_name, state):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO pending_auth (user_id, phone, api_id, api_hash, session_name, state)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        ON CONFLICT (user_id) DO UPDATE SET 
+        phone = EXCLUDED.phone,
+        api_id = EXCLUDED.api_id,
+        api_hash = EXCLUDED.api_hash,
+        session_name = EXCLUDED.session_name,
+        state = EXCLUDED.state,
+        created_at = CURRENT_TIMESTAMP
+    """, (user_id, phone, api_id, api_hash, session_name, state))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+def get_pending_auth(user_id):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT phone, api_id, api_hash, session_name, state FROM pending_auth WHERE user_id = %s",
+        (user_id,)
+    )
+    result = cur.fetchone()
+    cur.close()
+    conn.close()
+    return result
+
+def delete_pending_auth(user_id):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM pending_auth WHERE user_id = %s", (user_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+async def check_phone_in_telegram(api_id, api_hash, session_name, phone_to_check, session_id=None):
     client = TelegramClient(session_name, api_id, api_hash)
     await client.connect()
     
     if not await client.is_user_authorized():
         await client.disconnect()
-        return {'error': 'Сесія не авторизована'}
+        if session_id:
+            mark_session_inactive(session_id)
+        return {'error': 'Сесія не авторизована', 'session_invalid': True}
     
     try:
         contact = InputPhoneContact(
@@ -70,16 +174,44 @@ async def check_phone_in_telegram(api_id, api_hash, session_name, phone_to_check
             return {'registered': False}
     except FloodWaitError as e:
         await client.disconnect()
-        return {'error': f'Зачекайте {e.seconds} секунд'}
+        return {'error': f'Ліміт! Зачекайте {e.seconds} сек', 'flood': True, 'wait_seconds': e.seconds}
     except Exception as e:
         await client.disconnect()
         return {'error': str(e)}
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    
+    pending = get_pending_auth(user_id)
+    if pending:
+        phone, api_id, api_hash, session_name, state = pending
+        user_data[user_id] = {
+            'phone': phone,
+            'api_id': api_id,
+            'api_hash': api_hash,
+            'session_name': session_name
+        }
+        
+        if state == 'waiting_code':
+            client = TelegramClient(session_name, api_id, api_hash)
+            await client.connect()
+            try:
+                await client.send_code_request(phone)
+                user_data[user_id]['client'] = client
+                user_states[user_id] = 'waiting_code'
+                await update.message.reply_text(
+                    f"📱 У тебе є незавершена авторизація для {phone}.\n"
+                    "Код відправлено повторно. Введи код з SMS/Telegram:"
+                )
+                return
+            except Exception as e:
+                await client.disconnect()
+                delete_pending_auth(user_id)
+    
     keyboard = [
         [InlineKeyboardButton("📋 Перевірити список", callback_data='check_list')],
         [InlineKeyboardButton("➕ Додати сесію", callback_data='add_session')],
-        [InlineKeyboardButton("📊 Кількість сесій", callback_data='session_count')],
+        [InlineKeyboardButton("📊 Мої сесії", callback_data='session_count')],
         [InlineKeyboardButton("🗑️ Видалити сесію", callback_data='delete_session')],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -88,7 +220,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📝 Надішли мені список номерів у форматі:\n"
         "+380991234567 Іван Петров\n"
         "+380997654321 Марія Сидоренко\n\n"
-        "Або використовуй кнопки нижче:",
+        "⚠️ Спочатку додай свою сесію (API_ID та API_HASH з my.telegram.org)\n\n"
+        "Використовуй кнопки нижче:",
         reply_markup=reply_markup
     )
 
@@ -98,6 +231,15 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     
     if query.data == 'check_list':
+        sessions = get_user_sessions(user_id)
+        if not sessions:
+            keyboard = [[InlineKeyboardButton("➕ Додати сесію", callback_data='add_session')]]
+            await query.edit_message_text(
+                "❌ У тебе немає активних сесій!\nСпочатку додай сесію.",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            return
+        
         user_states[user_id] = 'waiting_list'
         await query.edit_message_text(
             "📋 Надішли список номерів для перевірки.\n"
@@ -110,42 +252,37 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == 'add_session':
         user_states[user_id] = 'waiting_phone'
         user_data[user_id] = {}
+        delete_pending_auth(user_id)
         await query.edit_message_text(
             "📱 Надішли номер телефону для авторизації (формат: +380...)\n\n"
-            "⚠️ Це потрібно для перевірки номерів в Telegram."
+            "⚠️ Це твій особистий номер для перевірки інших номерів."
         )
     
     elif query.data == 'session_count':
-        conn = get_db()
-        cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM sessions")
-        count = cur.fetchone()[0]
-        cur.close()
-        conn.close()
+        sessions = get_user_sessions(user_id)
+        count = len(sessions)
+        
+        if count > 0:
+            session_list = "\n".join([f"• {s[1]}" for s in sessions])
+            text = f"📊 Твої активні сесії ({count}):\n\n{session_list}"
+        else:
+            text = "📊 У тебе немає активних сесій."
         
         keyboard = [[InlineKeyboardButton("↩️ Назад", callback_data='back')]]
-        await query.edit_message_text(
-            f"📊 Кількість активних сесій: {count}",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
     
     elif query.data == 'delete_session':
-        conn = get_db()
-        cur = conn.cursor()
-        cur.execute("SELECT phone FROM sessions")
-        sessions = cur.fetchall()
-        cur.close()
-        conn.close()
+        sessions = get_user_sessions(user_id)
         
         if not sessions:
             keyboard = [[InlineKeyboardButton("↩️ Назад", callback_data='back')]]
             await query.edit_message_text(
-                "❌ Немає активних сесій для видалення.",
+                "❌ У тебе немає сесій для видалення.",
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
             return
         
-        keyboard = [[InlineKeyboardButton(f"🗑️ {s[0]}", callback_data=f'del_{s[0]}')] for s in sessions]
+        keyboard = [[InlineKeyboardButton(f"🗑️ {s[1]}", callback_data=f'del_{s[0]}')] for s in sessions]
         keyboard.append([InlineKeyboardButton("↩️ Назад", callback_data='back')])
         await query.edit_message_text(
             "Виберіть сесію для видалення:",
@@ -156,7 +293,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [
             [InlineKeyboardButton("📋 Перевірити список", callback_data='check_list')],
             [InlineKeyboardButton("➕ Додати сесію", callback_data='add_session')],
-            [InlineKeyboardButton("📊 Кількість сесій", callback_data='session_count')],
+            [InlineKeyboardButton("📊 Мої сесії", callback_data='session_count')],
             [InlineKeyboardButton("🗑️ Видалити сесію", callback_data='delete_session')],
         ]
         await query.edit_message_text(
@@ -165,25 +302,26 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     
     elif query.data.startswith('del_'):
-        phone = query.data.replace('del_', '')
+        session_id = int(query.data.replace('del_', ''))
+        
         conn = get_db()
         cur = conn.cursor()
-        cur.execute("SELECT session_name FROM sessions WHERE phone = %s", (phone,))
+        cur.execute("SELECT session_name FROM sessions WHERE id = %s AND owner_id = %s", (session_id, user_id))
         row = cur.fetchone()
         if row:
             session_file = row[0] + '.session'
             if os.path.exists(session_file):
                 os.remove(session_file)
-        cur.execute("DELETE FROM sessions WHERE phone = %s", (phone,))
-        conn.commit()
+            cur.execute("DELETE FROM sessions WHERE id = %s AND owner_id = %s", (session_id, user_id))
+            conn.commit()
+            text = "✅ Сесію видалено!"
+        else:
+            text = "❌ Сесію не знайдено."
         cur.close()
         conn.close()
         
         keyboard = [[InlineKeyboardButton("↩️ Назад", callback_data='back')]]
-        await query.edit_message_text(
-            f"✅ Сесію {phone} видалено!",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -214,8 +352,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         api_id = user_data[user_id]['api_id']
         api_hash = text
         
-        session_name = f'session_{phone.replace("+", "").replace(" ", "")}'
+        session_name = f'session_{user_id}_{phone.replace("+", "").replace(" ", "")}'
         user_data[user_id]['session_name'] = session_name
+        
+        save_pending_auth(user_id, phone, api_id, api_hash, session_name, 'waiting_code')
         
         client = TelegramClient(session_name, api_id, api_hash)
         await client.connect()
@@ -224,16 +364,36 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await client.send_code_request(phone)
             user_data[user_id]['client'] = client
             user_states[user_id] = 'waiting_code'
-            await update.message.reply_text("📱 Код надіслано! Введи код з SMS (5 цифр)")
+            await update.message.reply_text("📱 Код надіслано! Введи код з SMS/Telegram (5 цифр)")
         except Exception as e:
+            delete_pending_auth(user_id)
             await update.message.reply_text(f"❌ Помилка: {str(e)}")
             await client.disconnect()
     
     elif state == 'waiting_code':
         data = user_data.get(user_id)
+        
         if not data or 'client' not in data:
-            await update.message.reply_text("❌ Сесія не знайдена. Почни спочатку /start")
-            return
+            pending = get_pending_auth(user_id)
+            if pending:
+                phone, api_id, api_hash, session_name, _ = pending
+                client = TelegramClient(session_name, api_id, api_hash)
+                await client.connect()
+                user_data[user_id] = {
+                    'phone': phone,
+                    'api_id': api_id,
+                    'api_hash': api_hash,
+                    'session_name': session_name,
+                    'client': client
+                }
+                data = user_data[user_id]
+            else:
+                keyboard = [[InlineKeyboardButton("➕ Додати сесію", callback_data='add_session')]]
+                await update.message.reply_text(
+                    "❌ Сесія не знайдена. Почни спочатку.",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+                return
         
         client = data['client']
         phone = data['phone']
@@ -244,18 +404,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             conn = get_db()
             cur = conn.cursor()
             cur.execute(
-                """INSERT INTO sessions (phone, api_id, api_hash, session_name) 
-                   VALUES (%s, %s, %s, %s) 
-                   ON CONFLICT (phone) DO UPDATE SET api_id = %s, api_hash = %s, session_name = %s""",
-                (phone, data['api_id'], data['api_hash'], data['session_name'],
-                 data['api_id'], data['api_hash'], data['session_name'])
+                """INSERT INTO sessions (owner_id, phone, api_id, api_hash, session_name) 
+                   VALUES (%s, %s, %s, %s, %s) 
+                   ON CONFLICT (owner_id, phone) DO UPDATE SET 
+                   api_id = EXCLUDED.api_id, 
+                   api_hash = EXCLUDED.api_hash, 
+                   session_name = EXCLUDED.session_name,
+                   is_active = TRUE""",
+                (user_id, phone, data['api_id'], data['api_hash'], data['session_name'])
             )
             conn.commit()
             cur.close()
             conn.close()
             
+            delete_pending_auth(user_id)
             await client.disconnect()
-            del user_data[user_id]
+            if user_id in user_data:
+                del user_data[user_id]
             user_states[user_id] = None
             
             keyboard = [[InlineKeyboardButton("↩️ Назад", callback_data='back')]]
@@ -264,6 +429,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
         except SessionPasswordNeededError:
+            save_pending_auth(user_id, phone, data['api_id'], data['api_hash'], data['session_name'], 'waiting_2fa')
             user_states[user_id] = 'waiting_2fa'
             await update.message.reply_text("🔐 Потрібен 2FA пароль. Введи його:")
         except Exception as e:
@@ -271,6 +437,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     elif state == 'waiting_2fa':
         data = user_data.get(user_id)
+        
+        if not data or 'client' not in data:
+            pending = get_pending_auth(user_id)
+            if pending:
+                phone, api_id, api_hash, session_name, _ = pending
+                client = TelegramClient(session_name, api_id, api_hash)
+                await client.connect()
+                user_data[user_id] = {
+                    'phone': phone,
+                    'api_id': api_id,
+                    'api_hash': api_hash,
+                    'session_name': session_name,
+                    'client': client
+                }
+                data = user_data[user_id]
+            else:
+                return
+        
         client = data['client']
         phone = data['phone']
         
@@ -280,18 +464,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             conn = get_db()
             cur = conn.cursor()
             cur.execute(
-                """INSERT INTO sessions (phone, api_id, api_hash, session_name) 
-                   VALUES (%s, %s, %s, %s) 
-                   ON CONFLICT (phone) DO UPDATE SET api_id = %s, api_hash = %s, session_name = %s""",
-                (phone, data['api_id'], data['api_hash'], data['session_name'],
-                 data['api_id'], data['api_hash'], data['session_name'])
+                """INSERT INTO sessions (owner_id, phone, api_id, api_hash, session_name) 
+                   VALUES (%s, %s, %s, %s, %s) 
+                   ON CONFLICT (owner_id, phone) DO UPDATE SET 
+                   api_id = EXCLUDED.api_id, 
+                   api_hash = EXCLUDED.api_hash, 
+                   session_name = EXCLUDED.session_name,
+                   is_active = TRUE""",
+                (user_id, phone, data['api_id'], data['api_hash'], data['session_name'])
             )
             conn.commit()
             cur.close()
             conn.close()
             
+            delete_pending_auth(user_id)
             await client.disconnect()
-            del user_data[user_id]
+            if user_id in user_data:
+                del user_data[user_id]
             user_states[user_id] = None
             
             keyboard = [[InlineKeyboardButton("↩️ Назад", callback_data='back')]]
@@ -303,27 +492,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"❌ Помилка 2FA: {str(e)}")
     
     elif state == 'waiting_list' or '\n' in text or text.startswith('+'):
-        conn = get_db()
-        cur = conn.cursor()
-        cur.execute("SELECT phone, api_id, api_hash, session_name FROM sessions LIMIT 1")
-        session = cur.fetchone()
-        cur.close()
-        conn.close()
+        sessions = get_user_sessions(user_id)
         
-        if not session:
+        if not sessions:
             keyboard = [[InlineKeyboardButton("➕ Додати сесію", callback_data='add_session')]]
             await update.message.reply_text(
-                "❌ Спочатку додай сесію для перевірки номерів!",
+                "❌ У тебе немає активних сесій! Додай сесію спочатку.",
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
             return
         
-        await update.message.reply_text("⏳ Перевіряю номери...")
-        
-        phone_db, api_id, api_hash, session_name = session
+        await update.message.reply_text(f"⏳ Перевіряю номери... (сесій: {len(sessions)})")
         
         lines = text.strip().split('\n')
         results = []
+        session_idx = 0
+        failed_sessions = set()
         
         for line in lines:
             line = line.strip()
@@ -340,10 +524,38 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not phone.startswith('+'):
                 phone = '+' + phone
             
-            check_result = await check_phone_in_telegram(api_id, api_hash, session_name, phone)
+            check_result = None
+            attempts = 0
+            max_attempts = len(sessions)
             
-            if 'error' in check_result:
-                results.append(f"⚠️ {phone} {name} - Помилка: {check_result['error']}")
+            while attempts < max_attempts:
+                current_idx = (session_idx + attempts) % len(sessions)
+                if current_idx in failed_sessions:
+                    attempts += 1
+                    continue
+                
+                session = sessions[current_idx]
+                session_id, _, api_id, api_hash, session_name = session
+                
+                check_result = await check_phone_in_telegram(api_id, api_hash, session_name, phone, session_id)
+                
+                if check_result.get('session_invalid'):
+                    failed_sessions.add(current_idx)
+                    attempts += 1
+                    continue
+                
+                if check_result.get('flood'):
+                    attempts += 1
+                    continue
+                
+                break
+            
+            session_idx = (session_idx + 1) % len(sessions)
+            
+            if check_result is None:
+                results.append(f"⚠️ {phone} {name} - Всі сесії недоступні")
+            elif 'error' in check_result:
+                results.append(f"⚠️ {phone} {name} - {check_result['error']}")
             elif check_result['registered']:
                 tg_name = f"{check_result['first_name']} {check_result['last_name']}".strip()
                 username = f"@{check_result['username']}" if check_result['username'] else ""

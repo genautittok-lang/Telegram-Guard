@@ -46,13 +46,18 @@ def init_db():
     conn = get_db()
     cur = conn.cursor()
     
-    cur.execute("""
-        SELECT EXISTS (
-            SELECT FROM information_schema.tables 
-            WHERE table_name = 'sessions'
-        )
-    """)
-    table_exists = cur.fetchone()[0]
+    try:
+        cur.execute("""
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables 
+                WHERE table_name = 'sessions'
+            )
+        """)
+        row = cur.fetchone()
+        table_exists = row[0] if row else False
+    except Exception as e:
+        print(f"⚠️ Error checking database: {e}")
+        table_exists = False
     
     if not table_exists:
         cur.execute('''

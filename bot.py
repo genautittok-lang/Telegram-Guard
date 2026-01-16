@@ -280,11 +280,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print(f"👤 User ID: {user_id}, Data: {query.data}")
     
     if query.data == 'check_list':
-        sessions = get_user_sessions(user_id)
-        if not sessions:
+        all_sessions = get_all_active_sessions()
+        if not all_sessions:
             keyboard = [[InlineKeyboardButton("➕ Додати сесію", callback_data='add_session')]]
             await query.edit_message_text(
-                "❌ У тебе немає активних сесій!\nСпочатку додай сесію.",
+                "❌ Немає жодної активної сесії в системі!\nДодай сесію, щоб почати перевірку.",
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
             return

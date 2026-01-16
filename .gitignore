@@ -1,8 +1,1 @@
-node_modules
-dist
-.mastra
-.env.development
-.env
-*.db
-*.db-*
-.DS_Store
+node_modules\ndist\n.mastra\n.env.development\n.env\n*.db\n*.db-*\n.DS_Store\n*.session\n*.session-journal\n__pycache__/\n*.py[cod]\n*.replit\nreplit.nix\nvenv/\n.pythonlibs/\npoetry.lock\npyproject.toml

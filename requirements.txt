@@ -4,16 +4,3 @@ psycopg2-binary
 python-dotenv
 qrcode
 pillow
-pillow
-psycopg2-binary
-python-dotenv
-python-telegram-bot
-qrcode
-telegram
-telethon
-pillow
-psycopg2-binary
-python-dotenv
-python-telegram-bot
-qrcode
-telethon

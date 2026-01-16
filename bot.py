@@ -27,11 +27,13 @@ db_pool = None
 
 def init_pool():
     global db_pool
-    db_pool = pool.SimpleConnectionPool(1, 10, DATABASE_URL)
+    db_pool = pool.SimpleConnectionPool(1, 10, DATABASE_URL) if DATABASE_URL else None
 
 def get_db():
     if db_pool:
         return db_pool.getconn()
+    if not DATABASE_URL:
+        raise Exception("DATABASE_URL not set")
     return psycopg2.connect(DATABASE_URL)
 
 def release_db(conn):

@@ -832,8 +832,11 @@ class HealthHandler(BaseHTTPRequestHandler):
         pass
 
 def start_health_server():
-    server = HTTPServer(('0.0.0.0', 3000), HealthHandler)
-    server.serve_forever()
+    try:
+        server = HTTPServer(('0.0.0.0', 3000), HealthHandler)
+        server.serve_forever()
+    except OSError as e:
+        print(f"⚠️ Health server не запущено (порт зайнятий): {e}")
 
 def main():
     import sys

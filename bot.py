@@ -1,4 +1,4 @@
-# Bot v1.1 - Railway Ready
+# Bot v1.2 - Railway Ready - Fixed requirements.txt
 import io
 import qrcode
 import os

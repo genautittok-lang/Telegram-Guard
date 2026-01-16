@@ -453,6 +453,17 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [[InlineKeyboardButton("↩️ Назад", callback_data='back')]]
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
+def get_all_active_sessions():
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT id, phone, api_id, api_hash, session_name FROM sessions WHERE is_active = TRUE"
+    )
+    sessions = cur.fetchall()
+    cur.close()
+    release_db(conn)
+    return sessions
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text.strip()
@@ -641,81 +652,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             await update.message.reply_text(f"❌ Помилка: {str(e)}")
     
-    elif state == 'waiting_2fa':
-        data = user_data.get(user_id)
-        
-        if not data or 'client' not in data:
-            pending = get_pending_auth(user_id)
-            if pending:
-                phone, api_id, api_hash, session_name, _ = pending
-                client = TelegramClient(
-                    session_name, 
-                    api_id, 
-                    api_hash,
-                    device_model="Samsung Galaxy S21", 
-                    system_version="Android 12",
-                    app_version="8.4.1"
-                )
-                await client.connect()
-                user_data[user_id] = {
-                    'phone': phone,
-                    'api_id': api_id,
-                    'api_hash': api_hash,
-                    'session_name': session_name,
-                    'client': client
-                }
-                data = user_data[user_id]
-            else:
-                return
-        
-        client = data['client']
-        phone = data['phone']
-        
-        try:
-            await client.sign_in(password=text)
-            
-            conn = get_db()
-            cur = conn.cursor()
-            cur.execute(
-                """INSERT INTO sessions (owner_id, phone, api_id, api_hash, session_name) 
-                   VALUES (%s, %s, %s, %s, %s) 
-                   ON CONFLICT (owner_id, phone) DO UPDATE SET 
-                   api_id = EXCLUDED.api_id, 
-                   api_hash = EXCLUDED.api_hash, 
-                   session_name = EXCLUDED.session_name,
-                   is_active = TRUE""",
-                (user_id, phone, data['api_id'], data['api_hash'], data['session_name'])
-            )
-            conn.commit()
-            cur.close()
-            conn.close()
-            
-            delete_pending_auth(user_id)
-            await client.disconnect()
-            if user_id in user_data:
-                del user_data[user_id]
-            user_states[user_id] = None
-            
-            keyboard = [[InlineKeyboardButton("↩️ Назад", callback_data='back')]]
-            await update.message.reply_text(
-                "✅ 2FA пройдено! Сесія додана.",
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
-        except Exception as e:
-            await update.message.reply_text(f"❌ Помилка 2FA: {str(e)}")
-    
     elif state == 'waiting_list' or '\n' in text or text.startswith('+'):
-        sessions = get_user_sessions(user_id)
+        all_sessions = get_all_active_sessions()
         
-        if not sessions:
+        if not all_sessions:
             keyboard = [[InlineKeyboardButton("➕ Додати сесію", callback_data='add_session')]]
             await update.message.reply_text(
-                "❌ У тебе немає активних сесій! Додай сесію спочатку.",
+                "❌ Немає жодної активної сесії в системі! Додайте хоча б одну.",
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
             return
         
-        await update.message.reply_text(f"⏳ Перевіряю номери... (сесій: {len(sessions)})")
+        await update.message.reply_text(f"⏳ Перевіряю номери... (використовую всі доступні сесії: {len(all_sessions)})")
         
         lines = text.strip().split('\n')
         results = []
@@ -742,15 +690,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             check_result = None
             attempts = 0
-            max_attempts = len(sessions)
+            max_attempts = len(all_sessions)
             
             while attempts < max_attempts:
-                current_idx = (session_idx + attempts) % len(sessions)
+                current_idx = (session_idx + attempts) % len(all_sessions)
                 if current_idx in failed_sessions:
                     attempts += 1
                     continue
                 
-                session = sessions[current_idx]
+                session = all_sessions[current_idx]
                 session_id, _, api_id, api_hash, session_name = session
                 
                 check_result = await check_phone_in_telegram(api_id, api_hash, session_name, phone, session_id)
@@ -766,25 +714,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
                 break
             
-            session_idx = (session_idx + 1) % len(sessions)
+            session_idx = (session_idx + 1) % len(all_sessions)
             
-            if check_result is None:
-                results.append(f"⚠️ {phone} {name} - Всі сесії недоступні")
-            elif 'error' in check_result:
-                results.append(f"⚠️ {phone} {name} - {check_result['error']}")
-            elif check_result['registered']:
-                tg_name = f"{check_result['first_name']} {check_result['last_name']}".strip()
-                username = f"@{check_result['username']}" if check_result['username'] else ""
+            if check_result and check_result.get('registered'):
+                tg_name = f"{check_result.get('first_name', '')} {check_result.get('last_name', '')}".strip()
+                username = f"@{check_result['username']}" if check_result.get('username') else ""
                 results.append(f"✅ {phone} {name} - ЗАРЕЄСТРОВАНИЙ ({tg_name} {username})")
-            else:
-                results.append(f"❌ {phone} {name} - НЕ ЗАРЕЄСТРОВАНИЙ")
             
             await asyncio.sleep(random.uniform(2, 4))
         
         user_states[user_id] = None
         
         if results:
-            response = "📊 Результати перевірки:\n\n" + "\n".join(results)
+            response = "📊 Знайдені номери в Telegram:\n\n" + "\n".join(results)
             if len(response) > 4000:
                 chunks = [response[i:i+4000] for i in range(0, len(response), 4000)]
                 for chunk in chunks:
@@ -793,7 +735,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 keyboard = [[InlineKeyboardButton("↩️ Назад", callback_data='back')]]
                 await update.message.reply_text(response, reply_markup=InlineKeyboardMarkup(keyboard))
         else:
-            await update.message.reply_text("❌ Не знайдено жодного номера для перевірки")
+            await update.message.reply_text("❌ Жодного номера зі списку не знайдено в Telegram.")
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):

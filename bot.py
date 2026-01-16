@@ -653,6 +653,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         results = []
         session_idx = 0
         failed_sessions = set()
+        flooded_sessions = {}
+        all_flooded = False
         
         for line in lines:
             line = line.strip()
@@ -693,12 +695,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     continue
                 
                 if check_result.get('flood'):
+                    wait_sec = check_result.get('wait_seconds', 0)
+                    flooded_sessions[current_idx] = wait_sec
                     attempts += 1
                     continue
                 
                 break
             
             session_idx = (session_idx + 1) % len(all_sessions)
+            
+            if len(flooded_sessions) + len(failed_sessions) >= len(all_sessions):
+                all_flooded = True
+                max_wait = max(flooded_sessions.values()) if flooded_sessions else 0
+                await update.message.reply_text(
+                    f"⚠️ ВСІ СЕСІЇ ЗАБЛОКОВАНІ!\n"
+                    f"🕐 Потрібно зачекати ~{max_wait} секунд ({max_wait // 60} хв)\n"
+                    f"💡 Додайте більше сесій для обходу лімітів."
+                )
+                break
             
             if check_result and check_result.get('registered'):
                 tg_name = f"{check_result.get('first_name', '')} {check_result.get('last_name', '')}".strip()
@@ -708,6 +722,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await asyncio.sleep(random.uniform(0.5, 1.0))
         
         user_states[user_id] = None
+        
+        if all_flooded:
+            return
         
         if results:
             response = "📊 Знайдені номери в Telegram:\n\n" + "\n".join(results)

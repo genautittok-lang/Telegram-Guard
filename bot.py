@@ -469,7 +469,92 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     state = user_states.get(user_id)
     
-    if state == 'waiting_phone':
+    if state == 'waiting_list' or '\n' in text or text.startswith('+'):
+        all_sessions = get_all_active_sessions()
+        
+        if not all_sessions:
+            keyboard = [[InlineKeyboardButton("➕ Додати сесію", callback_data='add_session')]]
+            await update.message.reply_text(
+                "❌ Немає жодної активної сесії в системі! Додайте хоча б одну.",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            return
+        
+        await update.message.reply_text(f"⏳ Перевіряю номери... (використовую всі доступні сесії: {len(all_sessions)})")
+        
+        lines = text.strip().split('\n')
+        results = []
+        session_idx = 0
+        failed_sessions = set()
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            
+            parts = line.split(maxsplit=1)
+            phone = parts[0] if parts else ''
+            name = parts[1] if len(parts) > 1 else 'Невідомо'
+            
+            if not phone.startswith('+') and not phone.startswith('38') and not phone.startswith('7'):
+                continue
+            
+            if not phone.startswith('+'):
+                if phone.startswith('38'):
+                    phone = '+' + phone
+                elif phone.startswith('7'):
+                    phone = '+' + phone
+            
+            check_result = None
+            attempts = 0
+            max_attempts = len(all_sessions)
+            
+            while attempts < max_attempts:
+                current_idx = (session_idx + attempts) % len(all_sessions)
+                if current_idx in failed_sessions:
+                    attempts += 1
+                    continue
+                
+                session = all_sessions[current_idx]
+                session_id, _, api_id, api_hash, session_name = session
+                
+                check_result = await check_phone_in_telegram(api_id, api_hash, session_name, phone, session_id)
+                
+                if check_result.get('session_invalid'):
+                    failed_sessions.add(current_idx)
+                    attempts += 1
+                    continue
+                
+                if check_result.get('flood'):
+                    attempts += 1
+                    continue
+                
+                break
+            
+            session_idx = (session_idx + 1) % len(all_sessions)
+            
+            if check_result and check_result.get('registered'):
+                tg_name = f"{check_result.get('first_name', '')} {check_result.get('last_name', '')}".strip()
+                username = f"@{check_result['username']}" if check_result.get('username') else ""
+                results.append(f"✅ {phone} {name} - ЗАРЕЄСТРОВАНИЙ ({tg_name} {username})")
+            
+            await asyncio.sleep(random.uniform(2, 4))
+        
+        user_states[user_id] = None
+        
+        if results:
+            response = "📊 Знайдені номери в Telegram:\n\n" + "\n".join(results)
+            if len(response) > 4000:
+                chunks = [response[i:i+4000] for i in range(0, len(response), 4000)]
+                for chunk in chunks:
+                    await update.message.reply_text(chunk)
+            else:
+                keyboard = [[InlineKeyboardButton("↩️ Назад", callback_data='back')]]
+                await update.message.reply_text(response, reply_markup=InlineKeyboardMarkup(keyboard))
+        else:
+            await update.message.reply_text("❌ Жодного номера зі списку не знайдено в Telegram.")
+    
+    elif state == 'waiting_phone':
         if not text.startswith('+'):
             await update.message.reply_text("❌ Номер має починатися з +")
             return

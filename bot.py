@@ -1,3 +1,4 @@
+# Bot v1.1 - Railway Ready
 import io
 import qrcode
 import os

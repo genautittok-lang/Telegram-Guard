@@ -161,11 +161,14 @@ def get_pending_auth(user_id):
 
 def delete_pending_auth(user_id):
     conn = get_db()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM pending_auth WHERE user_id = %s", (user_id,))
-    conn.commit()
-    cur.close()
-    release_db(conn)
+    try:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM pending_auth WHERE user_id = %s", (user_id,))
+        conn.commit()
+        cur.close()
+    finally:
+        release_db(conn)
+
 
 async def check_phone_in_telegram(api_id, api_hash, session_name, phone_to_check, session_id=None):
     client = TelegramClient(

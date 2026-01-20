@@ -723,7 +723,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 username = f"@{check_result['username']}" if check_result.get('username') else ""
                 results.append(f"✅ {phone} {name} - ЗАРЕЄСТРОВАНИЙ ({tg_name} {username})")
             
-            await asyncio.sleep(random.uniform(0.5, 1.0))
+            await asyncio.sleep(random.uniform(1.0, 2.5))
         
         user_states[user_id] = None
         
